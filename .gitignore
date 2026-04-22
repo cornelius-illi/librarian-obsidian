@@ -1,0 +1,4 @@
+.DS_Store
+*.log
+
+# plugin/ has its own .gitignore (node_modules/, main.js, main.js.map)

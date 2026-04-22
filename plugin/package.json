@@ -1,0 +1,26 @@
+{
+  "name": "librarian",
+  "version": "0.1.0",
+  "description": "Claude-driven librarian for an Obsidian wiki (Karpathy LLM-Wiki pattern).",
+  "main": "main.js",
+  "private": true,
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "tsc --noEmit && node esbuild.config.mjs production"
+  },
+  "keywords": [],
+  "author": "Cornelius Illi",
+  "license": "Apache-2.0",
+  "devDependencies": {
+    "@types/node": "^20.12.12",
+    "builtin-modules": "^3.3.0",
+    "esbuild": "^0.21.4",
+    "obsidian": "^1.5.11",
+    "tslib": "^2.6.2",
+    "typescript": "^5.4.5"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.90.0",
+    "gray-matter": "^4.0.3"
+  }
+}

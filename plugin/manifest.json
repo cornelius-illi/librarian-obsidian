@@ -1,0 +1,10 @@
+{
+  "id": "librarian",
+  "name": "Librarian",
+  "version": "0.1.0",
+  "minAppVersion": "1.5.0",
+  "description": "Claude-gestuetzter Bibliothekar fuer ein Wiki aus raw/ Quellen. Drei deterministische Befehle: Ingest, Repair Broken Links, Forget. Folgt Karpathys LLM-Wiki-Muster.",
+  "author": "Cornelius Illi",
+  "authorUrl": "https://corneliusilli.de",
+  "isDesktopOnly": true
+}
