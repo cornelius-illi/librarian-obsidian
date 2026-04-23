@@ -1,9 +1,106 @@
-import Anthropic from "@anthropic-ai/sdk";
+import Anthropic, { APIError, APIUserAbortError } from "@anthropic-ai/sdk";
 
 export interface AskResult {
 	text: string;
 	usage: { inputTokens: number; outputTokens: number };
 	truncated: boolean;
+}
+
+const RETRYABLE_STATUSES = new Set([408, 409, 425, 429, 500, 502, 503, 504]);
+const RETRYABLE_CODES = new Set(["ECONNRESET", "ETIMEDOUT", "ECONNREFUSED", "EPIPE", "EAI_AGAIN"]);
+
+export interface RetryLogEntry {
+	attempt: number;
+	status?: number;
+	waitMs: number;
+	reason: string;
+}
+
+function isRetryableError(err: unknown): boolean {
+	if (err instanceof APIError && typeof err.status === "number" && RETRYABLE_STATUSES.has(err.status)) {
+		return true;
+	}
+	if (err && typeof err === "object") {
+		const code = (err as { code?: unknown }).code;
+		if (typeof code === "string" && RETRYABLE_CODES.has(code)) return true;
+		const cause = (err as { cause?: unknown }).cause;
+		if (cause && typeof cause === "object") {
+			const causeCode = (cause as { code?: unknown }).code;
+			if (typeof causeCode === "string" && RETRYABLE_CODES.has(causeCode)) return true;
+		}
+	}
+	return false;
+}
+
+function retryAfterSeconds(err: unknown): number | null {
+	if (!(err instanceof APIError)) return null;
+	const headers = (err as unknown as { headers?: Record<string, string> }).headers;
+	if (!headers) return null;
+	const raw = headers["retry-after"] ?? headers["Retry-After"];
+	if (!raw) return null;
+	const parsed = Number(raw);
+	if (Number.isFinite(parsed) && parsed >= 0) return parsed;
+	const date = Date.parse(raw);
+	if (Number.isFinite(date)) {
+		const delta = (date - Date.now()) / 1000;
+		return delta > 0 ? delta : 0;
+	}
+	return null;
+}
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+	return new Promise((resolve, reject) => {
+		if (signal?.aborted) {
+			reject(new DOMException("Aborted", "AbortError"));
+			return;
+		}
+		const timer = setTimeout(() => {
+			signal?.removeEventListener("abort", onAbort);
+			resolve();
+		}, ms);
+		const onAbort = () => {
+			clearTimeout(timer);
+			reject(new DOMException("Aborted", "AbortError"));
+		};
+		signal?.addEventListener("abort", onAbort, { once: true });
+	});
+}
+
+async function withRetry<T>(
+	op: () => Promise<T>,
+	opts: {
+		signal?: AbortSignal;
+		maxAttempts?: number;
+		onRetry?: (entry: RetryLogEntry) => void;
+	} = {},
+): Promise<T> {
+	const maxAttempts = opts.maxAttempts ?? 4;
+	let attempt = 0;
+	while (true) {
+		if (opts.signal?.aborted) {
+			throw new DOMException("Aborted", "AbortError");
+		}
+		attempt++;
+		try {
+			return await op();
+		} catch (err) {
+			if (err instanceof APIUserAbortError || (err instanceof DOMException && err.name === "AbortError")) {
+				throw err;
+			}
+			if (attempt >= maxAttempts || !isRetryableError(err)) {
+				throw err;
+			}
+			const retryAfter = retryAfterSeconds(err);
+			const backoff = Math.min(32_000, 1_000 * 2 ** (attempt - 1));
+			const jitter = Math.floor(Math.random() * 500);
+			const waitMs = retryAfter !== null ? Math.ceil(retryAfter * 1_000) : backoff + jitter;
+			const status = err instanceof APIError ? err.status : undefined;
+			const reason = err instanceof Error ? err.message : String(err);
+			opts.onRetry?.({ attempt, status, waitMs, reason });
+			console.warn(`[claude] retry ${attempt}/${maxAttempts - 1} in ${waitMs}ms — ${reason}`);
+			await sleep(waitMs, opts.signal);
+		}
+	}
 }
 
 export interface ImageBlock {
@@ -50,16 +147,17 @@ function buildAnthropic(client: ClaudeClient): Anthropic {
 	return new Anthropic({ apiKey: client.apiKey, dangerouslyAllowBrowser: true });
 }
 
-export async function ask(
-	client: ClaudeClient,
-	opts: {
-		system: string;
-		prompt: string;
-		images?: ImageBlock[];
-		model?: string;
-		maxTokens?: number;
-	},
-): Promise<AskResult> {
+export interface AskOpts {
+	system: string;
+	prompt: string;
+	images?: ImageBlock[];
+	model?: string;
+	maxTokens?: number;
+	signal?: AbortSignal;
+	onRetry?: (entry: RetryLogEntry) => void;
+}
+
+export async function ask(client: ClaudeClient, opts: AskOpts): Promise<AskResult> {
 	const anthropic = buildAnthropic(client);
 	const model = opts.model || client.defaultModel || "claude-sonnet-4-6";
 
@@ -78,20 +176,27 @@ export async function ask(
 			]
 			: opts.prompt;
 
-	const stream = anthropic.messages.stream({
-		model,
-		max_tokens: clampMaxTokens(opts.maxTokens, model),
-		system: [
-			{
-				type: "text",
-				text: opts.system,
-				cache_control: { type: "ephemeral" },
-			},
-		],
-		messages: [{ role: "user", content: userContent }],
-	});
-
-	const response = await stream.finalMessage();
+	const response = await withRetry(
+		() => {
+			const stream = anthropic.messages.stream(
+				{
+					model,
+					max_tokens: clampMaxTokens(opts.maxTokens, model),
+					system: [
+						{
+							type: "text",
+							text: opts.system,
+							cache_control: { type: "ephemeral" },
+						},
+					],
+					messages: [{ role: "user", content: userContent }],
+				},
+				opts.signal ? { signal: opts.signal } : undefined,
+			);
+			return stream.finalMessage();
+		},
+		{ signal: opts.signal, onRetry: opts.onRetry },
+	);
 
 	const textBlock = response.content.find((b) => b.type === "text");
 	if (!textBlock || textBlock.type !== "text") {
@@ -116,14 +221,7 @@ export interface AskJsonResult<T> {
 
 export async function askForJson<T>(
 	client: ClaudeClient,
-	opts: {
-		system: string;
-		prompt: string;
-		images?: ImageBlock[];
-		model?: string;
-		maxTokens?: number;
-		maxRetries?: number;
-	},
+	opts: AskOpts & { maxRetries?: number },
 ): Promise<AskJsonResult<T>> {
 	const maxRetries = opts.maxRetries ?? 1;
 

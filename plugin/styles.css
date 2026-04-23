@@ -1,0 +1,160 @@
+.librarian-progress-view .view-content {
+	padding: 12px;
+}
+
+.librarian-progress-empty {
+	color: var(--text-muted);
+	font-size: var(--font-ui-small);
+}
+
+.librarian-progress-header {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	margin-bottom: 8px;
+}
+
+.librarian-progress-title {
+	display: flex;
+	align-items: baseline;
+	gap: 8px;
+}
+
+.librarian-progress-status {
+	color: var(--text-muted);
+	font-size: var(--font-ui-small);
+}
+
+.librarian-progress-stats {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 10px;
+	font-size: var(--font-ui-small);
+	color: var(--text-muted);
+}
+
+.librarian-progress-count {
+	color: var(--text-normal);
+	font-weight: 600;
+}
+
+.librarian-progress-errors {
+	color: var(--text-error);
+	font-weight: 600;
+}
+
+.librarian-progress-cancelled {
+	color: var(--text-accent);
+}
+
+.librarian-progress-bar {
+	width: 100%;
+	height: 6px;
+	background: var(--background-modifier-border);
+	border-radius: 3px;
+	overflow: hidden;
+	margin-bottom: 8px;
+}
+
+.librarian-progress-bar-fill {
+	height: 100%;
+	background: var(--interactive-accent);
+	transition: width 200ms ease;
+}
+
+.librarian-progress-bar-fill.has-errors {
+	background: var(--text-error);
+}
+
+.librarian-progress-actions {
+	display: flex;
+	justify-content: flex-end;
+	margin-bottom: 8px;
+}
+
+.librarian-progress-list {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	max-height: calc(100vh - 220px);
+	overflow-y: auto;
+}
+
+.librarian-progress-row {
+	display: flex;
+	align-items: flex-start;
+	gap: 8px;
+	padding: 4px 6px;
+	border-radius: 4px;
+	font-size: var(--font-ui-small);
+}
+
+.librarian-progress-row:hover {
+	background: var(--background-modifier-hover);
+}
+
+.librarian-progress-icon {
+	flex-shrink: 0;
+	margin-top: 2px;
+	color: var(--text-muted);
+}
+
+.librarian-progress-row.status-ok .librarian-progress-icon {
+	color: var(--color-green);
+}
+
+.librarian-progress-row.status-error .librarian-progress-icon {
+	color: var(--text-error);
+}
+
+.librarian-progress-row.status-running .librarian-progress-icon {
+	color: var(--interactive-accent);
+	animation: librarian-spin 1.2s linear infinite;
+}
+
+.librarian-progress-row.status-cancelled .librarian-progress-icon {
+	color: var(--text-faint);
+}
+
+@keyframes librarian-spin {
+	from { transform: rotate(0deg); }
+	to { transform: rotate(360deg); }
+}
+
+.librarian-progress-row-main {
+	flex: 1;
+	min-width: 0;
+}
+
+.librarian-progress-name {
+	display: block;
+	word-break: break-all;
+	color: var(--text-normal);
+	text-decoration: none;
+}
+
+.librarian-progress-name:hover {
+	text-decoration: underline;
+}
+
+.librarian-progress-detail {
+	color: var(--text-muted);
+	font-size: 11px;
+	margin-top: 2px;
+	word-break: break-word;
+}
+
+.librarian-ingest-controls {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	align-items: center;
+	justify-content: flex-end;
+	margin: 4px 0 10px 0;
+}
+
+.librarian-ingest-counter {
+	flex: 1;
+	color: var(--text-muted);
+	font-size: var(--font-ui-small);
+}

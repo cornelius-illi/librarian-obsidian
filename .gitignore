@@ -2,3 +2,8 @@
 *.log
 
 # plugin/ has its own .gitignore (node_modules/, main.js, main.js.map)
+
+# Ephemere lokale Arbeit, nicht fuer das Repo
+cortex-guide.md
+analysis/
+.claude/settings.local.json

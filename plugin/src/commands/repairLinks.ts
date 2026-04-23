@@ -1,6 +1,7 @@
 import { Notice } from "obsidian";
 import type LibrarianPlugin from "../../main";
 import { askForJson } from "../core/claude";
+import { estimateCost } from "../core/progress";
 import { loadSystemPrompt } from "../core/prompts";
 import { requireRootPrefix } from "../core/pathSafety";
 import {
@@ -87,8 +88,14 @@ export async function runRepairLinksCommand(plugin: LibrarianPlugin): Promise<vo
 	let totalCreated = 0;
 	let totalSkipped = 0;
 	let totalStillBroken = 0;
+	let totalErrors = 0;
+	let totalCancelled = 0;
+
+	const signal = plugin.progress.startRun("repair", "Repair Broken Links", []);
+	await plugin.activateProgressView();
 
 	for (let iter = 1; iter <= MAX_ITERATIONS; iter++) {
+		if (plugin.progress.current?.cancelRequested) break;
 		const aliasToId = new Map<string, string>();
 		for (const entry of loadedPages) {
 			if (isSystemPage(entry.name)) continue;
@@ -185,11 +192,32 @@ export async function runRepairLinksCommand(plugin: LibrarianPlugin): Promise<vo
 		let iterCreated = 0;
 		let batchIndex = 0;
 
+		const batchLabels = batches.map(
+			(b, i) => `Iter ${iter} · Batch ${i + 1}/${batches.length} (${b.length} Seiten)`,
+		);
+		const firstBatchIdx = plugin.progress.appendFiles(batchLabels);
+
 		for (const batch of batches) {
+			const progressIdx = firstBatchIdx + batchIndex;
 			batchIndex++;
-			new Notice(
-				`Librarian: Iter ${iter}, Batch ${batchIndex}/${batches.length} (${batch.length} Seiten)…`,
-			);
+
+			if (plugin.progress.current?.cancelRequested) {
+				plugin.progress.updateFile(progressIdx, { status: "cancelled" });
+				totalCancelled++;
+				continue;
+			}
+
+			plugin.progress.setCurrentIndex(progressIdx);
+			plugin.progress.updateFile(progressIdx, {
+				status: "running",
+				message: "KI generiert fehlende Seiten …",
+			});
+
+			if (!plugin.isProgressViewOpen()) {
+				new Notice(
+					`Librarian: Iter ${iter}, Batch ${batchIndex}/${batches.length} (${batch.length} Seiten)…`,
+				);
+			}
 
 			const targetSections = batch
 				.map((t) => {
@@ -213,16 +241,33 @@ ${existingPageList}
 
 ${targetSections}`;
 
+			let batchCreated = 0;
 			try {
-				const { result, attempts } = await askForJson<LintFixAiResult>(client, {
+				const { result, response, attempts } = await askForJson<LintFixAiResult>(client, {
 					system: systemPrompt,
 					prompt,
 					model: settings.modelLint,
 					maxTokens: 16384,
+					signal,
+					onRetry: (entry) => {
+						const label = entry.status ? `HTTP ${entry.status}` : entry.reason;
+						plugin.progress.updateFile(progressIdx, {
+							attempts: entry.attempt + 1,
+							message: `Retry ${entry.attempt} (${label}) in ${Math.round(entry.waitMs / 1000)}s …`,
+						});
+					},
 				});
 
 				if (!result) {
-					console.error(`[repairLinks] JSON-Parsing fehlgeschlagen nach ${attempts} Versuch(en)`);
+					const msg = `JSON-Parsing fehlgeschlagen nach ${attempts} Versuch(en)`;
+					console.error(`[repairLinks] ${msg}`);
+					plugin.progress.updateFile(progressIdx, {
+						status: "error",
+						attempts,
+						error: msg,
+						message: undefined,
+					});
+					totalErrors++;
 					continue;
 				}
 
@@ -264,6 +309,7 @@ ${targetSections}`;
 							await vault.writeFile(safePath, page.content);
 							iterCreated++;
 							totalCreated++;
+							batchCreated++;
 
 							const pageId = toPageId(safePath);
 							if (!loadedPages.find((p) => p.id === pageId)) {
@@ -282,8 +328,35 @@ ${targetSections}`;
 				}
 
 				if (result.skipped) totalSkipped += result.skipped.length;
+
+				plugin.progress.updateFile(progressIdx, {
+					status: "ok",
+					attempts,
+					message: `${batchCreated} erstellt${result.skipped ? `, ${result.skipped.length} uebersprungen` : ""}`,
+					tokensIn: response.usage.inputTokens,
+					tokensOut: response.usage.outputTokens,
+					costUsd: estimateCost(settings.modelLint, response.usage),
+				});
 			} catch (err) {
-				console.error(`[repairLinks] Iter ${iter} Batch ${batchIndex}:`, err);
+				const isAbort =
+					err instanceof DOMException && err.name === "AbortError" ||
+					(err instanceof Error && err.name === "APIUserAbortError");
+				if (isAbort) {
+					totalCancelled++;
+					plugin.progress.updateFile(progressIdx, {
+						status: "cancelled",
+						message: "Abgebrochen",
+					});
+				} else {
+					totalErrors++;
+					const msg = err instanceof Error ? err.message : String(err);
+					plugin.progress.updateFile(progressIdx, {
+						status: "error",
+						error: msg,
+						message: undefined,
+					});
+					console.error(`[repairLinks] Iter ${iter} Batch ${batchIndex}:`, err);
+				}
 			}
 		}
 
@@ -302,10 +375,13 @@ ${targetSections}`;
 		);
 	}
 
-	new Notice(
-		`Librarian: Reparatur abgeschlossen — ${totalCreated} erstellt, ${totalSkipped} uebersprungen, ${frontmatterFixes} Frontmatter, ${addedToIndex} Index-Eintraege.`,
-		8000,
-	);
+	plugin.progress.finishRun();
+
+	const parts = [`${totalCreated} erstellt`, `${totalSkipped} uebersprungen`];
+	if (totalErrors > 0) parts.push(`${totalErrors} Fehler`);
+	if (totalCancelled > 0) parts.push(`${totalCancelled} abgebrochen`);
+	parts.push(`${frontmatterFixes} Frontmatter`, `${addedToIndex} Index-Eintraege`);
+	new Notice(`Librarian: Reparatur abgeschlossen — ${parts.join(", ")}.`, 8000);
 
 	if (totalStillBroken > 0 && totalCreated === 0) {
 		new Notice(

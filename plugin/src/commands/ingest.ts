@@ -1,6 +1,7 @@
 import { Notice, TFile, normalizePath } from "obsidian";
 import type LibrarianPlugin from "../../main";
 import { askForJson, type ImageBlock } from "../core/claude";
+import { estimateCost } from "../core/progress";
 import { extractKeywords } from "../core/keywords";
 import { loadSystemPrompt } from "../core/prompts";
 import { requireRootPrefix, toScopedRelativePath } from "../core/pathSafety";
@@ -22,6 +23,30 @@ import { IngestConfirmModal } from "../ui/IngestModal";
 
 const IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".gif", ".webp"]);
 const TEXT_EXTENSIONS = new Set([".md", ".txt", ".csv", ".json", ".log", ".html"]);
+
+class StageNotice {
+	private notice: Notice | null = null;
+	constructor(private readonly plugin: LibrarianPlugin, initial: string) {
+		this.update(initial);
+	}
+	update(message: string): void {
+		if (this.plugin.isProgressViewOpen()) {
+			if (this.notice) {
+				this.notice.hide();
+				this.notice = null;
+			}
+			return;
+		}
+		if (this.notice) this.notice.setMessage(message);
+		else this.notice = new Notice(message, 0);
+	}
+	hideSoon(delayMs: number): void {
+		if (!this.notice) return;
+		const n = this.notice;
+		this.notice = null;
+		setTimeout(() => n.hide(), delayMs);
+	}
+}
 
 interface IngestResult {
 	sourceFile?: string;
@@ -122,10 +147,28 @@ export async function runIngestCommand(plugin: LibrarianPlugin): Promise<void> {
 
 	let processed = 0;
 	let errors = 0;
+	let cancelled = 0;
 	const allFilledStubPaths = new Set<string>();
 
-	for (const file of confirmed) {
-		const stage = new Notice(`Librarian: Analysiere ${file} …`, 0);
+	const signal = plugin.progress.startRun("ingest", "Ingest", confirmed);
+	await plugin.activateProgressView();
+
+	for (let fileIndex = 0; fileIndex < confirmed.length; fileIndex++) {
+		const file = confirmed[fileIndex];
+
+		if (plugin.progress.current?.cancelRequested) {
+			plugin.progress.updateFile(fileIndex, {
+				status: "cancelled",
+				message: "Vor Start abgebrochen",
+			});
+			cancelled++;
+			continue;
+		}
+
+		plugin.progress.setCurrentIndex(fileIndex);
+		plugin.progress.updateFile(fileIndex, { status: "running", message: "Analysiere …" });
+
+		const stage = new StageNotice(plugin, `Librarian: Analysiere ${file} …`);
 		try {
 			const ext = extOf(file);
 			let rawContent: string;
@@ -197,7 +240,8 @@ Quelldatum: ${sourceDate}
 
 ${rawContent}`;
 
-			stage.setMessage(`Librarian: KI analysiert ${file} …`);
+			stage.update(`Librarian: KI analysiert ${file} …`);
+			plugin.progress.updateFile(fileIndex, { message: "KI analysiert …" });
 
 			const { result, response, attempts, lastDiag } = await askForJson<IngestResult>(client, {
 				system: systemPrompt,
@@ -205,17 +249,35 @@ ${rawContent}`;
 				images: imageBlocks,
 				model: settings.modelIngest,
 				maxTokens: 32768,
+				signal,
+				onRetry: (entry) => {
+					const label = entry.status ? `HTTP ${entry.status}` : entry.reason;
+					plugin.progress.updateFile(fileIndex, {
+						attempts: entry.attempt + 1,
+						message: `Retry ${entry.attempt} (${label}) in ${Math.round(entry.waitMs / 1000)}s …`,
+					});
+				},
 			});
 
 			if (!result) {
 				errors++;
-				stage.setMessage(`Librarian: ${file} — JSON-Parsing fehlgeschlagen nach ${attempts} Versuch(en)`);
+				const msg = `JSON-Parsing fehlgeschlagen nach ${attempts} Versuch(en)`;
+				stage.update(`Librarian: ${file} — ${msg}`);
+				plugin.progress.updateFile(fileIndex, {
+					status: "error",
+					attempts,
+					error: msg,
+					message: undefined,
+				});
+				await vault.appendLog(
+					`\n## [${today()}] ingest-error | ${file}\n${msg}${lastDiag ? `\n${lastDiag}` : ""}\n`,
+				);
 				if (lastDiag) console.error(`[ingest] ${file}: ${lastDiag}`);
-				setTimeout(() => stage.hide(), 5000);
+				stage.hideSoon(5000);
 				continue;
 			}
 
-			stage.setMessage(
+			stage.update(
 				`Librarian: Schreibe Wiki-Seiten fuer ${file} (${response.usage.inputTokens.toLocaleString("de")} in / ${response.usage.outputTokens.toLocaleString("de")} out)`,
 			);
 
@@ -223,6 +285,11 @@ ${rawContent}`;
 				for (const op of result.operations) {
 					try {
 						const safePath = requireRootPrefix(op.path, settings.wikiDir);
+						const basename = safePath.split("/").pop() || "";
+						if (basename === "log.md" || basename === "index.md") {
+							console.warn(`[ingest] ${file}: ignoriere Operation auf ${basename} (Plugin-gepflegt)`);
+							continue;
+						}
 						await vault.writeFile(safePath, op.content);
 
 						const wikiRelative = toPageId(safePath);
@@ -248,17 +315,45 @@ ${rawContent}`;
 			);
 
 			processed++;
-			stage.setMessage(`Librarian: ${file} verarbeitet — ${created} erstellt, ${updated} aktualisiert`);
-			setTimeout(() => stage.hide(), 4000);
+			stage.update(`Librarian: ${file} verarbeitet — ${created} erstellt, ${updated} aktualisiert`);
+			plugin.progress.updateFile(fileIndex, {
+				status: "ok",
+				attempts,
+				message: `${created} erstellt, ${updated} aktualisiert`,
+				tokensIn: response.usage.inputTokens,
+				tokensOut: response.usage.outputTokens,
+				costUsd: estimateCost(settings.modelIngest, response.usage),
+			});
+			stage.hideSoon(4000);
 		} catch (err) {
-			errors++;
-			stage.setMessage(
-				`Librarian: Fehler bei ${file}: ${err instanceof Error ? err.message : String(err)}`,
-			);
-			setTimeout(() => stage.hide(), 6000);
-			console.error(`[ingest] ${file}`, err);
+			const isAbort =
+				err instanceof DOMException && err.name === "AbortError" ||
+				(err instanceof Error && err.name === "APIUserAbortError");
+			if (isAbort) {
+				cancelled++;
+				plugin.progress.updateFile(fileIndex, {
+					status: "cancelled",
+					message: "Abgebrochen",
+				});
+				stage.update(`Librarian: ${file} abgebrochen`);
+				stage.hideSoon(3000);
+			} else {
+				errors++;
+				const msg = err instanceof Error ? err.message : String(err);
+				plugin.progress.updateFile(fileIndex, {
+					status: "error",
+					error: msg,
+					message: undefined,
+				});
+				await vault.appendLog(`\n## [${today()}] ingest-error | ${file}\n${msg}\n`);
+				stage.update(`Librarian: Fehler bei ${file}: ${msg}`);
+				stage.hideSoon(6000);
+				console.error(`[ingest] ${file}`, err);
+			}
 		}
 	}
+
+	plugin.progress.finishRun();
 
 	if (pendingStubs.length > 0) {
 		const allStubPaths = new Set(pendingStubs.map((s) => s.path));
@@ -319,8 +414,11 @@ ${rawContent}`;
 	await generateWikilinkMap(app, settings.wikiDir);
 	await updateIndexes(app, settings.wikiDir);
 
+	const parts = [`${processed} erfolgreich`];
+	if (errors > 0) parts.push(`${errors} Fehler`);
+	if (cancelled > 0) parts.push(`${cancelled} abgebrochen`);
 	new Notice(
-		`Librarian: Ingest abgeschlossen — ${processed} erfolgreich${errors > 0 ? `, ${errors} Fehler` : ""}. ${newStubs.size} neue Stubs.`,
+		`Librarian: Ingest abgeschlossen — ${parts.join(", ")}. ${newStubs.size} neue Stubs.`,
 		8000,
 	);
 }

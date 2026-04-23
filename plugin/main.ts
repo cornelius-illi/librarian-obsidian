@@ -1,16 +1,25 @@
-import { Notice, Plugin } from "obsidian";
+import { Notice, Plugin, WorkspaceLeaf } from "obsidian";
 import {
 	DEFAULT_SETTINGS,
 	LibrarianSettings,
 	LibrarianSettingTab,
 } from "./src/settings";
+import { ProgressStore } from "./src/core/progress";
+import { ProgressView, VIEW_TYPE_LIBRARIAN_PROGRESS } from "./src/ui/ProgressView";
 
 export default class LibrarianPlugin extends Plugin {
 	settings!: LibrarianSettings;
+	progress!: ProgressStore;
 
 	async onload(): Promise<void> {
 		await this.loadSettings();
+		this.progress = new ProgressStore();
 		this.addSettingTab(new LibrarianSettingTab(this.app, this));
+
+		this.registerView(
+			VIEW_TYPE_LIBRARIAN_PROGRESS,
+			(leaf) => new ProgressView(leaf, this),
+		);
 
 		this.addCommand({
 			id: "ingest-source",
@@ -42,6 +51,24 @@ export default class LibrarianPlugin extends Plugin {
 			},
 		});
 
+		this.addCommand({
+			id: "open-progress",
+			name: "Open Librarian progress",
+			callback: () => this.activateProgressView(),
+		});
+
+		this.addCommand({
+			id: "cancel-run",
+			name: "Cancel running ingest/repair",
+			checkCallback: (checking) => {
+				if (!this.progress.isRunning()) return false;
+				if (checking) return true;
+				const cancelled = this.progress.requestCancel();
+				if (cancelled) new Notice("Librarian: Abbruch angefordert — wartet auf aktuelle Datei.");
+				return true;
+			},
+		});
+
 		this.addRibbonIcon("book-open", "Librarian: Ingest source", async () => {
 			if (!this.requireApiKey()) return;
 			const { runIngestCommand } = await import("./src/commands/ingest");
@@ -61,6 +88,25 @@ export default class LibrarianPlugin extends Plugin {
 
 	async saveSettings(): Promise<void> {
 		await this.saveData(this.settings);
+	}
+
+	isProgressViewOpen(): boolean {
+		return this.app.workspace.getLeavesOfType(VIEW_TYPE_LIBRARIAN_PROGRESS).length > 0;
+	}
+
+	async activateProgressView(): Promise<void> {
+		const { workspace } = this.app;
+		const existing = workspace.getLeavesOfType(VIEW_TYPE_LIBRARIAN_PROGRESS);
+		let leaf: WorkspaceLeaf | null;
+		if (existing.length > 0) {
+			leaf = existing[0];
+		} else {
+			leaf = workspace.getRightLeaf(false);
+			if (leaf) {
+				await leaf.setViewState({ type: VIEW_TYPE_LIBRARIAN_PROGRESS, active: true });
+			}
+		}
+		if (leaf) workspace.revealLeaf(leaf);
 	}
 
 	private requireApiKey(): boolean {
