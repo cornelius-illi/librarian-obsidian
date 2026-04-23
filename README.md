@@ -2,7 +2,7 @@
 
 Ein **LLM-gepflegtes Wiki** fuer Obsidian nach dem Muster von Karpathys [LLM-Wiki-Gist](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) — aber mit der Disziplin, die ein rein gesprächsbasierter Agent nicht liefert: Allow-List-Wikilinks, Broken-Link-Reparatur und transaktionales "Vergessen".
 
-Ersetzt den aufwendigeren [Zettelkasten Desktop](https://github.com/ciluiy/Zettelkasten-2Brain-) (Electron-App), indem es nur die drei Operationen beibehaelt, die wirklich Plugin-Orchestrierung brauchen. Alles andere — Graph, Markdown-Rendering, Frontmatter, Suche, Git — uebernehmen Obsidian und die vorhandenen Community-Plugins.
+Ersetzt den aufwendigeren [Zettelkasten Desktop](https://github.com/GodModeAI2025/Zettelkasten-2Brain-) (Electron-App — konzeptionelle Vorlage und Ursprung von Schema + Skill-Prompts), indem es nur die drei Operationen beibehaelt, die wirklich Plugin-Orchestrierung brauchen. Alles andere — Graph, Markdown-Rendering, Frontmatter, Suche, Git — uebernehmen Obsidian und die vorhandenen Community-Plugins.
 
 ## Architektur
 
